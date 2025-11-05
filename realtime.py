@@ -70,9 +70,8 @@ def suggest_project_name(task_description, project_list):
     result = classifier(task_description, candidate_labels=project_list)
     return result['labels'][0]
 
-# --- MISSING FUNCTION ADDED BACK HERE ---
+# --- Employee Management ---
 def add_employee(employee_id, name, password):
-    """Adds a new employee to the database."""
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
@@ -103,17 +102,17 @@ def add_timesheet_entry(employee_id, project_name, task_description, hours_worke
     cursor.execute("INSERT INTO timesheet (employee_id, project_name, task_description, hours_worked, submission_date, submission_time) VALUES (?, ?, ?, ?, ?, ?)",
                    (employee_id, project_name, task_description, hours_worked, entry_date, now.strftime("%H:%M:%S")))
     conn.commit()
-    conn.close()
     
-    now_time = now.time()
-    status = "Present"
-    if now_time >= time(13, 0):
-        conn = get_db_connection()
-        prev_entry = pd.read_sql_query("SELECT * FROM attendance_log WHERE employee_id = ? AND attendance_date = ?", conn, params=(employee_id, str(entry_date)))
-        conn.close()
-        if prev_entry.empty or prev_entry.iloc[0]['status'] != 'Present':
-            status = "Half-day"
-    log_attendance(employee_id, entry_date, status, "Work Submitted")
+    # --- SIMPLIFIED ATTENDANCE LOGIC ---
+    # Check if there's already a log for today (e.g., manual leave entry)
+    cursor.execute("SELECT status FROM attendance_log WHERE employee_id = ? AND attendance_date = ?", (employee_id, str(entry_date)))
+    current_log = cursor.fetchone()
+    
+    # Only mark as 'Present' if no manual leave has been logged
+    if current_log is None:
+        log_attendance(employee_id, entry_date, "Present", "Work Submitted")
+
+    conn.close()
     
     with open(LAST_UPDATE_FILE, "w") as f:
         f.write(str(now.timestamp()))
@@ -139,15 +138,23 @@ def generate_monthly_report(year, month):
     summary = pd.merge(employees, summary, on='employee_id', how='left').fillna(0).astype({col: int for col in summary.columns if col not in ['employee_id', 'name']})
 
     _, num_days = calendar.monthrange(year, month)
+    # Consider only weekdays as working days
     working_days = sum(1 for i in range(1, num_days + 1) if date(year, month, i).weekday() < 5)
     
-    summary['Total Logged'] = summary.get('Present', 0) + summary.get('Half-day', 0) + summary.get('Leave', 0)
+    summary['Total Logged'] = sum(summary.get(col, 0) for col in ['Present', 'Half-day', 'Leave'])
     summary['Absent'] = working_days - summary['Total Logged']
     summary['Absent'] = summary['Absent'].clip(lower=0)
     summary = summary.drop(columns=['Total Logged'], errors='ignore')
 
     dates = [date(year, month, i) for i in range(1, num_days + 1)]
-    detailed_report = pd.DataFrame(index=employees['employee_id'], columns=dates).fillna('Absent')
+    detailed_report = pd.DataFrame(index=employees['employee_id'], columns=dates)
+
+    # Pre-fill working days with 'Absent' and weekends with 'Weekend'
+    for dt in dates:
+        if dt.weekday() < 5: # Monday to Friday
+            detailed_report[dt] = 'Absent'
+        else: # Saturday and Sunday
+            detailed_report[dt] = 'Weekend'
 
     for _, row in df.iterrows():
         try:
@@ -157,7 +164,7 @@ def generate_monthly_report(year, month):
         except Exception:
             pass
     
-    detailed_report = pd.merge(employees, detailed_report, on='employee_id', how='left')
+    detailed_report = pd.merge(employees.set_index('employee_id'), detailed_report, on='employee_id', how='left').reset_index()
 
     return summary, detailed_report
 
@@ -189,10 +196,7 @@ def employee_view():
     
     if page == "Submit Task":
         st.subheader("Timesheet Entry")
-        now_time = datetime.now(IST).time()
-        if not (time(8, 30) <= now_time <= time(10, 0) or now_time >= time(13, 0)):
-            st.warning("You can only submit tasks between 8:30 AM - 10:00 AM or after 1:00 PM.")
-            return
+        # --- TIME RESTRICTION IS NOW REMOVED ---
 
         with st.form("task_form"):
             entry_date = st.date_input("Date", value=datetime.now(IST).date())
