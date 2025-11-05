@@ -107,7 +107,6 @@ def add_timesheet_entry(employee_id, project_name, task_description, hours_worke
         log_attendance(employee_id, entry_date, "Present", "Work Submitted")
     conn.close()
     
-    # Signal that an update has occurred for the real-time dashboard
     with open(LAST_UPDATE_FILE, "w") as f:
         f.write(str(now.timestamp()))
 
@@ -120,16 +119,12 @@ def get_all_employees():
 
 def get_todays_attendance_status():
     employees = get_all_employees()
-    if employees.empty:
-        return pd.DataFrame(columns=["Employee ID", "Name", "Status", "Reason"])
-    
+    if employees.empty: return pd.DataFrame(columns=["Employee ID", "Name", "Status", "Reason"])
     today = datetime.now(IST).date()
     conn = get_db_connection()
     query = "SELECT employee_id, status, reason FROM attendance_log WHERE attendance_date = ?"
     todays_log = pd.read_sql_query(query, conn, params=(str(today),))
     conn.close()
-    
-    # Merge employee list with today's log, marking those not in the log as 'Absent'
     status_df = pd.merge(employees, todays_log, on='employee_id', how='left')
     status_df['status'].fillna('Absent', inplace=True)
     status_df['reason'].fillna('', inplace=True)
@@ -138,24 +133,21 @@ def get_todays_attendance_status():
 def get_timesheet_entries_today():
     today = datetime.now(IST).date()
     conn = get_db_connection()
-    query = """
-    SELECT e.name, t.project_name, t.task_description, t.hours_worked, t.submission_time
-    FROM timesheet t JOIN employees e ON t.employee_id = e.employee_id
-    WHERE t.submission_date = ? ORDER BY t.submission_time DESC
-    """
+    query = "SELECT e.name, t.project_name, t.task_description, t.hours_worked, t.submission_time FROM timesheet t JOIN employees e ON t.employee_id = e.employee_id WHERE t.submission_date = ? ORDER BY t.submission_time DESC"
     df = pd.read_sql_query(query, conn, params=(str(today),))
     conn.close()
     return df
 
-def get_weekly_timesheet_data(start_date, end_date):
+# --- UPDATED FUNCTION FOR DAILY TIMESHEET REPORT ---
+def get_daily_timesheet_data(selected_date):
+    """Retrieves all timesheet entries for a specific day."""
     conn = get_db_connection()
-    query = "SELECT t.submission_date, e.name, t.project_name, t.task_description, t.hours_worked FROM timesheet t JOIN employees e ON t.employee_id = e.employee_id WHERE t.submission_date BETWEEN ? AND ? ORDER BY t.submission_date, e.name"
-    df = pd.read_sql_query(query, conn, params=(str(start_date), str(end_date)))
+    query = "SELECT t.submission_date, e.name, t.project_name, t.task_description, t.hours_worked FROM timesheet t JOIN employees e ON t.employee_id = e.employee_id WHERE t.submission_date = ? ORDER BY e.name, t.submission_time"
+    df = pd.read_sql_query(query, conn, params=(str(selected_date),))
     conn.close()
     return df
 
 def generate_monthly_report(year, month):
-    # This function remains unchanged for historical payroll reports
     employees = get_all_employees()
     if employees.empty: return pd.DataFrame(), pd.DataFrame()
     conn = get_db_connection()
@@ -183,7 +175,6 @@ def generate_monthly_report(year, month):
 
 # --- Streamlit UI Views ---
 def login_page():
-    # Unchanged
     st.header("Employee Login")
     with st.form("login_form"):
         employee_id = st.text_input("Employee ID")
@@ -193,11 +184,9 @@ def login_page():
                 st.session_state["logged_in"] = True
                 st.session_state["employee_id"] = employee_id
                 st.rerun()
-            else:
-                st.error("Invalid credentials.")
+            else: st.error("Invalid credentials.")
 
 def check_employee_credentials(employee_id, password):
-    # Unchanged
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT password FROM employees WHERE employee_id = ?", (employee_id,))
@@ -206,7 +195,6 @@ def check_employee_credentials(employee_id, password):
     return result and result['password'] == hash_password(password)
 
 def employee_view():
-    # Unchanged
     st.header(f"Employee Portal: {st.session_state['employee_id']}")
     page = st.sidebar.radio("Menu", ["Submit Task", "Mark Leave / Absence"])
     if page == "Submit Task":
@@ -218,7 +206,7 @@ def employee_view():
             with col1:
                 st.session_state.project_name = st.text_input("Project Name", value=st.session_state.get('project_name', ''))
             with col2:
-                st.write("&#8203;") # Empty space for alignment
+                st.write("&#8203;")
                 if st.form_submit_button("💡 Suggest Project"):
                     project_list = get_unique_project_names()
                     if project_list and st.session_state.task_description:
@@ -237,7 +225,7 @@ def employee_view():
         with st.form("leave_form", clear_on_submit=True):
             leave_date = st.date_input("Date", value=datetime.now(IST).date())
             status = st.selectbox("Type of Leave", ["Leave", "Half-day"])
-            reason = st.text_area("Reason (e.g., Sick Leave, Personal Emergency)")
+            reason = st.text_area("Reason (e.g., Sick Leave)")
             if st.form_submit_button("Submit"):
                 if reason:
                     log_attendance(st.session_state['employee_id'], leave_date, status, reason)
@@ -256,33 +244,26 @@ def get_last_update_time():
             except (ValueError, TypeError): return 0.0
     return 0.0
 
-# --- NEW REAL-TIME DASHBOARD VIEW ---
 def admin_dashboard_view():
     st.header(f"Today's Dashboard ({datetime.now(IST).strftime('%d %b, %Y')})")
-    
     st.subheader("Live Attendance Status")
     attendance_placeholder = st.empty()
-    
     st.subheader("Today's Timesheet Entries")
     timesheet_placeholder = st.empty()
-
-    # Initial data load
     if 'last_update_check' not in st.session_state:
         st.session_state.last_update_check = get_last_update_time()
         attendance_placeholder.dataframe(get_todays_attendance_status(), use_container_width=True)
         timesheet_placeholder.dataframe(get_timesheet_entries_today(), use_container_width=True)
-
-    # Real-time update loop
     while True:
         last_update_time = get_last_update_time()
         if last_update_time > st.session_state.last_update_check:
             st.session_state.last_update_check = last_update_time
             attendance_placeholder.dataframe(get_todays_attendance_status(), use_container_width=True)
             timesheet_placeholder.dataframe(get_timesheet_entries_today(), use_container_width=True)
-        time_sleep.sleep(3) # Check for updates every 3 seconds
+        time_sleep.sleep(3)
 
 def admin_view():
-    page = st.sidebar.selectbox("Admin Menu", ["Today's Dashboard", "Weekly Timesheet", "Monthly Report", "Manage Employees"])
+    page = st.sidebar.selectbox("Admin Menu", ["Today's Dashboard", "Daily Timesheet Report", "Monthly Report", "Manage Employees"])
 
     if page == "Today's Dashboard":
         admin_dashboard_view()
@@ -299,21 +280,22 @@ def admin_view():
         st.subheader("All Employees")
         st.dataframe(get_all_employees(), use_container_width=True)
 
-    elif page == "Weekly Timesheet":
-        st.header("Weekly Timesheet Report")
-        selected_date = st.date_input("Select a date to view its week", datetime.now(IST).date())
-        start_of_week = selected_date - timedelta(days=selected_date.weekday())
-        end_of_week = start_of_week + timedelta(days=6)
-        st.info(f"Showing report for the week: **{start_of_week.strftime('%d %b, %Y')}** to **{end_of_week.strftime('%d %b, %Y')}**")
-        weekly_df = get_weekly_timesheet_data(start_of_week, end_of_week)
-        if weekly_df.empty:
-            st.warning("No timesheet entries found for the selected week.")
+    # --- UPDATED DAILY TIMESHEET PAGE ---
+    elif page == "Daily Timesheet Report":
+        st.header("Daily Timesheet Report")
+        selected_date = st.date_input("Select a date to view", datetime.now(IST).date())
+        st.info(f"Showing report for: **{selected_date.strftime('%d %b, %Y')}**")
+        
+        daily_df = get_daily_timesheet_data(selected_date)
+        
+        if daily_df.empty:
+            st.warning("No timesheet entries found for the selected day.")
         else:
-            st.dataframe(weekly_df, use_container_width=True)
-            total_hours = weekly_df['hours_worked'].sum()
-            st.metric(label="Total Hours Worked this Week", value=f"{total_hours} hrs")
-            csv = weekly_df.to_csv(index=False).encode('utf-8')
-            st.download_button("Download Weekly Timesheet as CSV", csv, f'weekly_timesheet_{start_of_week}_to_{end_of_week}.csv', 'text/csv')
+            st.dataframe(daily_df, use_container_width=True)
+            total_hours = daily_df['hours_worked'].sum()
+            st.metric(label="Total Hours Logged on this Day", value=f"{total_hours} hrs")
+            csv = daily_df.to_csv(index=False).encode('utf-8')
+            st.download_button("Download Daily Report as CSV", csv, f'daily_timesheet_{selected_date}.csv', 'text/csv')
 
     elif page == "Monthly Report":
         st.header("Monthly Attendance Report")
@@ -323,7 +305,7 @@ def admin_view():
         with col2: month = st.selectbox("Select Month", range(1, 13), index=datetime.now(IST).month - 1)
         summary_df, detailed_df = generate_monthly_report(year, month)
         if summary_df.empty:
-            st.warning("No data found for the selected period or no employees in the system.")
+            st.warning("No data found for the selected period.")
         else:
             st.subheader("Monthly Summary")
             st.dataframe(summary_df.set_index('employee_id'), use_container_width=True)
