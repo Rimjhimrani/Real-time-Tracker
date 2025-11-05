@@ -12,7 +12,7 @@ import calendar
 # --- App Configuration ---
 st.set_page_config(page_title="AI-Powered Timesheet & Payroll Tool", layout="wide")
 
-# --- Timezone Configuration (CORRECTED) ---
+# --- Timezone Configuration ---
 IST = pytz.timezone('Asia/Kolkata')
 
 # --- Database Setup ---
@@ -69,6 +69,21 @@ def suggest_project_name(task_description, project_list):
     classifier = get_classification_pipeline()
     result = classifier(task_description, candidate_labels=project_list)
     return result['labels'][0]
+
+# --- MISSING FUNCTION ADDED BACK HERE ---
+def add_employee(employee_id, name, password):
+    """Adds a new employee to the database."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("INSERT INTO employees (employee_id, name, password) VALUES (?, ?, ?)",
+                       (employee_id, name, hash_password(password)))
+        conn.commit()
+        st.success(f"Employee {name} ({employee_id}) added successfully.")
+    except sqlite3.IntegrityError:
+        st.error(f"Employee ID {employee_id} already exists.")
+    finally:
+        conn.close()
 
 # --- Core Logic Functions ---
 def log_attendance(employee_id, attendance_date, status, reason=""):
@@ -140,7 +155,7 @@ def generate_monthly_report(year, month):
             if row['employee_id'] in detailed_report.index:
                 detailed_report.loc[row['employee_id'], attendance_dt] = row['status']
         except Exception:
-            pass # Ignore parsing errors for robustness
+            pass
     
     detailed_report = pd.merge(employees, detailed_report, on='employee_id', how='left')
 
