@@ -1,7 +1,7 @@
 import streamlit as st
 import sqlite3
 import pandas as pd
-from datetime import datetime, date, time
+from datetime import datetime, date, time, timedelta
 import time as time_sleep
 import os
 import hashlib
@@ -88,10 +88,8 @@ def add_employee(employee_id, name, password):
 def log_attendance(employee_id, attendance_date, status, reason=""):
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("""
-        INSERT OR REPLACE INTO attendance_log (employee_id, attendance_date, status, reason)
-        VALUES (?, ?, ?, ?)
-    """, (employee_id, attendance_date, status, reason))
+    cursor.execute("INSERT OR REPLACE INTO attendance_log (employee_id, attendance_date, status, reason) VALUES (?, ?, ?, ?)",
+                   (employee_id, attendance_date, status, reason))
     conn.commit()
     conn.close()
 
@@ -103,15 +101,10 @@ def add_timesheet_entry(employee_id, project_name, task_description, hours_worke
                    (employee_id, project_name, task_description, hours_worked, entry_date, now.strftime("%H:%M:%S")))
     conn.commit()
     
-    # --- SIMPLIFIED ATTENDANCE LOGIC ---
-    # Check if there's already a log for today (e.g., manual leave entry)
     cursor.execute("SELECT status FROM attendance_log WHERE employee_id = ? AND attendance_date = ?", (employee_id, str(entry_date)))
     current_log = cursor.fetchone()
-    
-    # Only mark as 'Present' if no manual leave has been logged
     if current_log is None:
         log_attendance(employee_id, entry_date, "Present", "Work Submitted")
-
     conn.close()
     
     with open(LAST_UPDATE_FILE, "w") as f:
@@ -126,11 +119,10 @@ def get_all_employees():
 
 def generate_monthly_report(year, month):
     employees = get_all_employees()
-    if employees.empty:
-        return pd.DataFrame(), pd.DataFrame()
+    if employees.empty: return pd.DataFrame(), pd.DataFrame()
 
     conn = get_db_connection()
-    query = "SELECT employee_id, attendance_date, status, reason FROM attendance_log WHERE strftime('%Y', attendance_date) = ? AND strftime('%m', attendance_date) = ?"
+    query = "SELECT employee_id, attendance_date, status FROM attendance_log WHERE strftime('%Y', attendance_date) = ? AND strftime('%m', attendance_date) = ?"
     df = pd.read_sql_query(query, conn, params=(str(year), f'{month:02d}'))
     conn.close()
 
@@ -138,7 +130,6 @@ def generate_monthly_report(year, month):
     summary = pd.merge(employees, summary, on='employee_id', how='left').fillna(0).astype({col: int for col in summary.columns if col not in ['employee_id', 'name']})
 
     _, num_days = calendar.monthrange(year, month)
-    # Consider only weekdays as working days
     working_days = sum(1 for i in range(1, num_days + 1) if date(year, month, i).weekday() < 5)
     
     summary['Total Logged'] = sum(summary.get(col, 0) for col in ['Present', 'Half-day', 'Leave'])
@@ -148,25 +139,42 @@ def generate_monthly_report(year, month):
 
     dates = [date(year, month, i) for i in range(1, num_days + 1)]
     detailed_report = pd.DataFrame(index=employees['employee_id'], columns=dates)
-
-    # Pre-fill working days with 'Absent' and weekends with 'Weekend'
     for dt in dates:
-        if dt.weekday() < 5: # Monday to Friday
-            detailed_report[dt] = 'Absent'
-        else: # Saturday and Sunday
-            detailed_report[dt] = 'Weekend'
+        detailed_report[dt] = 'Weekend' if dt.weekday() >= 5 else 'Absent'
 
     for _, row in df.iterrows():
         try:
             attendance_dt = pd.to_datetime(row['attendance_date']).date()
             if row['employee_id'] in detailed_report.index:
                 detailed_report.loc[row['employee_id'], attendance_dt] = row['status']
-        except Exception:
-            pass
+        except Exception: pass
     
     detailed_report = pd.merge(employees.set_index('employee_id'), detailed_report, on='employee_id', how='left').reset_index()
-
     return summary, detailed_report
+
+# --- NEW FUNCTION FOR WEEKLY TIMESHEET ---
+def get_weekly_timesheet_data(start_date, end_date):
+    """Retrieves all timesheet entries for a given week."""
+    conn = get_db_connection()
+    query = """
+    SELECT
+        t.submission_date,
+        e.name,
+        t.project_name,
+        t.task_description,
+        t.hours_worked
+    FROM
+        timesheet t
+    JOIN
+        employees e ON t.employee_id = e.employee_id
+    WHERE
+        t.submission_date BETWEEN ? AND ?
+    ORDER BY
+        t.submission_date, e.name;
+    """
+    df = pd.read_sql_query(query, conn, params=(str(start_date), str(end_date)))
+    conn.close()
+    return df
 
 # --- Streamlit UI Views ---
 def login_page():
@@ -196,8 +204,6 @@ def employee_view():
     
     if page == "Submit Task":
         st.subheader("Timesheet Entry")
-        # --- TIME RESTRICTION IS NOW REMOVED ---
-
         with st.form("task_form"):
             entry_date = st.date_input("Date", value=datetime.now(IST).date())
             st.session_state.task_description = st.text_area("Task Description", value=st.session_state.get('task_description', ''))
@@ -213,8 +219,7 @@ def employee_view():
                     if project_list and st.session_state.task_description:
                         st.session_state.project_name = suggest_project_name(st.session_state.task_description, project_list)
                         st.rerun()
-                    else:
-                        st.warning("Please enter a task description first.")
+                    else: st.warning("Please enter a task description first.")
             
             hours_worked = st.number_input("Hours Worked", min_value=0.5, step=0.5)
             
@@ -223,8 +228,7 @@ def employee_view():
                     add_timesheet_entry(st.session_state['employee_id'], st.session_state.project_name, st.session_state.task_description, hours_worked, entry_date)
                     st.success("Task submitted and attendance logged!")
                     st.session_state.project_name, st.session_state.task_description = "", ""
-                else:
-                    st.error("Please fill all fields.")
+                else: st.error("Please fill all fields.")
 
     elif page == "Mark Leave / Absence":
         st.subheader("Submit Leave or Reason for Absence")
@@ -237,8 +241,7 @@ def employee_view():
                 if reason:
                     log_attendance(st.session_state['employee_id'], leave_date, status, reason)
                     st.success(f"Your status for {leave_date} has been logged as '{status}'.")
-                else:
-                    st.error("A reason is required.")
+                else: st.error("A reason is required.")
 
 def get_unique_project_names():
     conn = get_db_connection()
@@ -246,7 +249,8 @@ def get_unique_project_names():
     finally: conn.close()
 
 def admin_view():
-    page = st.sidebar.selectbox("Admin Menu", ["Monthly Report", "Manage Employees"])
+    # --- UPDATED ADMIN MENU ---
+    page = st.sidebar.selectbox("Admin Menu", ["Weekly Timesheet", "Monthly Report", "Manage Employees"])
 
     if page == "Manage Employees":
         st.header("Manage Employees")
@@ -274,12 +278,42 @@ def admin_view():
         else:
             st.subheader("Monthly Summary")
             st.dataframe(summary_df.set_index('employee_id'), use_container_width=True)
-            
-            csv = summary_df.to_csv(index=False).encode('utf-8')
+            csv = summary_df.to_csv().encode('utf-8')
             st.download_button("Download Summary as CSV", csv, f'attendance_summary_{year}_{month:02d}.csv', 'text/csv')
 
             st.subheader("Day-by-Day Detailed Report")
             st.dataframe(detailed_df.set_index('employee_id'), use_container_width=True)
+
+    # --- NEW WEEKLY TIMESHEET PAGE ---
+    elif page == "Weekly Timesheet":
+        st.header("Weekly Timesheet Report")
+        
+        selected_date = st.date_input("Select a date to view its week", datetime.now(IST).date())
+        
+        # Calculate the start of the week (Monday) and end of the week (Sunday)
+        start_of_week = selected_date - timedelta(days=selected_date.weekday())
+        end_of_week = start_of_week + timedelta(days=6)
+        
+        st.info(f"Showing report for the week: **{start_of_week.strftime('%d %b, %Y')}** to **{end_of_week.strftime('%d %b, %Y')}**")
+        
+        weekly_df = get_weekly_timesheet_data(start_of_week, end_of_week)
+        
+        if weekly_df.empty:
+            st.warning("No timesheet entries found for the selected week.")
+        else:
+            st.dataframe(weekly_df, use_container_width=True)
+            
+            # Add total hours worked
+            total_hours = weekly_df['hours_worked'].sum()
+            st.metric(label="Total Hours Worked this Week", value=f"{total_hours} hrs")
+
+            csv = weekly_df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="Download Weekly Timesheet as CSV",
+                data=csv,
+                file_name=f'weekly_timesheet_{start_of_week}_to_{end_of_week}.csv',
+                mime='text/csv',
+            )
 
 # --- Main App Logic ---
 def main():
